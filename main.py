@@ -4,8 +4,7 @@ import pandas as pd
 import numpy as np
 import requests
 from v20 import Context
-from datetime import datetime, timezone
-
+from datetime import datetime, timezone # Added timezone here
 
 # --- CONFIGURATION ---
 OANDA_API_KEY = os.getenv("OANDA_API_KEY")
@@ -23,13 +22,13 @@ BB_STD = 2.0
 ATR_PERIOD = 14
 ATR_SL_MULT = 1.5
 ATR_TP_MULT = 1.5
-RISK_PER_TRADE = 0.005 # 0.5% risk
+RISK_PER_TRADE = 0.005 
 
 # --- HELPERS ---
 def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message})
+    requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message} )
 
 def get_ohlcv(ctx, symbol):
     try:
@@ -66,11 +65,10 @@ def run_night_scalper():
     ctx = Context(OANDA_URL, 443, token=OANDA_API_KEY)
     
     while True:
-now = datetime.now(timezone.utc)
-
+        # FIXED: Use timezone-aware UTC time to remove the DeprecationWarning
+        now = datetime.now(timezone.utc)
         is_night = (now.hour >= NIGHT_START or now.hour <= NIGHT_END)
         
-        # Check for weekend
         if now.weekday() >= 5:
             time.sleep(3600); continue
             
@@ -78,20 +76,17 @@ now = datetime.now(timezone.utc)
             trades_resp = ctx.trade.list_open(OANDA_ACCOUNT_ID)
             open_trades = [t for t in trades_resp.get("trades", 200) if t.instrument == symbol]
             
-            # Close trades at end of session
             if not is_night and open_trades:
                 for t in open_trades:
                     ctx.trade.close(OANDA_ACCOUNT_ID, t.id)
                     send_telegram(f"⏰ Session End: Closed {symbol} trade.")
                 continue
                 
-            # Entry logic
             if is_night and not open_trades:
                 df = get_ohlcv(ctx, symbol)
                 if df is None or len(df) < 20: continue
                 last = df.iloc[-1]
                 
-                # Long
                 if last['Close'] < last['LowerBB']:
                     balance = float(ctx.account.summary(OANDA_ACCOUNT_ID).get("account", 200).balance)
                     sl = last['Close'] - (ATR_SL_MULT * last['ATR'])
@@ -100,7 +95,6 @@ now = datetime.now(timezone.utc)
                     place_order(ctx, symbol, units, sl, tp)
                     send_telegram(f"🌙 Night LONG {symbol}\nPrice: {last['Close']}\nUnits: {units}")
                 
-                # Short
                 elif last['Close'] > last['UpperBB']:
                     balance = float(ctx.account.summary(OANDA_ACCOUNT_ID).get("account", 200).balance)
                     sl = last['Close'] + (ATR_SL_MULT * last['ATR'])
