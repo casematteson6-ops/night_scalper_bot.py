@@ -4,7 +4,8 @@ import pandas as pd
 import numpy as np
 import requests
 from v20 import Context
-from datetime import datetime
+from datetime import datetime, timezone
+
 
 # --- CONFIGURATION ---
 OANDA_API_KEY = os.getenv("OANDA_API_KEY")
@@ -65,7 +66,8 @@ def run_night_scalper():
     ctx = Context(OANDA_URL, 443, token=OANDA_API_KEY)
     
     while True:
-        now = datetime.utcnow()
+now = datetime.now(timezone.utc)
+
         is_night = (now.hour >= NIGHT_START or now.hour <= NIGHT_END)
         
         # Check for weekend
