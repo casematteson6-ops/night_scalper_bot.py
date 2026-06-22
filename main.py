@@ -1,3 +1,5 @@
+
+main.py
 import os
 import time
 import pandas as pd
@@ -57,32 +59,31 @@ def place_order(ctx, symbol, units, sl, tp):
         sl_price = round(sl, 5)
         tp_price = round(tp, 5)
         
+        # OANDA v20 library requires the instrument to be a separate argument in .market()
+        # and NOT inside the 'order' dictionary for some versions.
         order_conf = {
-            "order": {
-                "type": "MARKET", "instrument": symbol, "units": str(units),
-                "timeInForce": "FOK",
-                "stopLossOnFill": {"price": f"{sl_price:.5f}"},
-                "takeProfitOnFill": {"price": f"{tp_price:.5f}"}
-            }
+            "type": "MARKET", 
+            "instrument": symbol, 
+            "units": str(units),
+            "timeInForce": "FOK",
+            "stopLossOnFill": {"price": f"{sl_price:.5f}"},
+            "takeProfitOnFill": {"price": f"{tp_price:.5f}"}
         }
         
         print(f"DEBUG: Attempting {symbol} order: Units={units}, SL={sl_price}, TP={tp_price}")
+        # Passing order_conf as keyword arguments
         response = ctx.order.market(OANDA_ACCOUNT_ID, **order_conf)
         
-        # Check if the response is successful (201 Created)
         if response.status != 201:
-            # Handle different response body structures safely
             body = response.body
-            error_msg = body.get("errorMessage", "Order Failed")
+            err_msg = body.get("errorMessage", "Order Failed")
             
-            # Extract rejection reason if available
             reject_reason = "N/A"
             if "orderRejectTransaction" in body:
-                # OANDA v20 library objects might not support .get()
                 reject_obj = body["orderRejectTransaction"]
                 reject_reason = getattr(reject_obj, "rejectReason", "Unknown Reason")
             
-            msg = f"❌ Order Rejected for {symbol}!\nStatus: {response.status}\nReason: {error_reason}\nReject: {reject_reason}"
+            msg = f"❌ Order Rejected for {symbol}!\nStatus: {response.status}\nReason: {err_msg}\nReject: {reject_reason}"
             print(msg)
             send_telegram(msg)
             return None
@@ -91,10 +92,6 @@ def place_order(ctx, symbol, units, sl, tp):
         return response
     except Exception as e:
         print(f"Error in place_order for {symbol}: {e}")
-        # If we got a response but failed to parse it, print the raw body for debugging
-        try:
-            print(f"DEBUG: Raw response body: {response.body}")
-        except: pass
         return None
 
 # --- MAIN LOOP ---
@@ -145,24 +142,27 @@ def run_night_scalper():
                         if df is None or len(df) < 20: continue
                         last = df.iloc[-1]
                         
-                        # --- RISK MANAGEMENT FIX ---
-                        # The previous logic was trying to trade huge units (e.g., -384,721).
-                        # We need to ensure the balance is used correctly.
                         summary_resp = ctx.account.summary(OANDA_ACCOUNT_ID)
                         summary = summary_resp.get("account", 200)
                         balance = float(summary.balance)
                         
-                        # Calculate ATR-based SL/TP
                         atr = last["ATR"]
                         sl_dist = ATR_SL_MULT * atr
+                        
+                        # --- LEVERAGE CAP ---
+                        # To prevent "Insufficient Margin", we limit the max trade size.
+                        # Max units = Balance * Max Leverage (e.g., 20)
+                        MAX_LEVERAGE = 20
+                        max_units_cap = int(balance * MAX_LEVERAGE)
                         
                         if last["Close"] < last["LowerBB"]:
                             sl = last["Close"] - sl_dist
                             tp = last["Close"] + (ATR_TP_MULT * atr)
                             
-                            # Unit Calculation: (Balance * Risk) / SL Distance in price
                             if sl_dist > 0:
                                 units = int((balance * RISK_PER_TRADE) / sl_dist)
+                                # Apply Leverage Cap
+                                units = min(units, max_units_cap)
                                 if units > 0:
                                     place_order(ctx, symbol, units, sl, tp)
                                     send_telegram(f"🌙 Night LONG {symbol}\nPrice: {last['Close']}\nUnits: {units}")
@@ -173,6 +173,10 @@ def run_night_scalper():
                             
                             if sl_dist > 0:
                                 units = int((balance * RISK_PER_TRADE) / sl_dist) * -1
+                                # Apply Leverage Cap (using abs for negative units)
+                                if abs(units) > max_units_cap:
+                                    units = -max_units_cap
+                                    
                                 if units < 0:
                                     place_order(ctx, symbol, units, sl, tp)
                                     send_telegram(f"🌙 Night SHORT {symbol}\nPrice: {last['Close']}\nUnits: {units}")
