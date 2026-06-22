@@ -54,15 +54,33 @@ def get_ohlcv(ctx, symbol):
 
 def place_order(ctx, symbol, units, sl, tp):
     try:
+        # Round prices to OANDA's required precision (usually 5 decimals for most pairs)
+        sl_price = round(sl, 5)
+        tp_price = round(tp, 5)
+        
         order_conf = {
             "order": {
                 "type": "MARKET", "instrument": symbol, "units": str(units),
                 "timeInForce": "FOK",
-                "stopLossOnFill": {"price": f"{sl:.5f}"},
-                "takeProfitOnFill": {"price": f"{tp:.5f}"}
+                "stopLossOnFill": {"price": f"{sl_price:.5f}"},
+                "takeProfitOnFill": {"price": f"{tp_price:.5f}"}
             }
         }
-        return ctx.order.market(OANDA_ACCOUNT_ID, **order_conf)
+        
+        print(f"DEBUG: Attempting {symbol} order: Units={units}, SL={sl_price}, TP={tp_price}")
+        response = ctx.order.market(OANDA_ACCOUNT_ID, **order_conf)
+        
+        if response.status != 201:
+            # Log the full error from OANDA to diagnose rejection
+            error_reason = response.body.get("errorMessage", "Unknown Error")
+            reject_reason = response.body.get("orderRejectTransaction", {}).get("rejectReason", "N/A")
+            msg = f"❌ Order Rejected for {symbol}!\nStatus: {response.status}\nReason: {error_reason}\nReject Reason: {reject_reason}"
+            print(msg)
+            send_telegram(msg)
+            return None
+            
+        print(f"✅ Order Successful: {symbol}")
+        return response
     except Exception as e:
         print(f"Error placing order for {symbol}: {e}")
         return None
@@ -71,20 +89,17 @@ def place_order(ctx, symbol, units, sl, tp):
 def run_night_scalper():
     print("🌙 Night Scalper Bot Starting...")
     
-    # Check credentials before starting
     if not OANDA_API_KEY or not OANDA_ACCOUNT_ID:
         error_msg = "❌ CRITICAL: OANDA_API_KEY or OANDA_ACCOUNT_ID not set!"
         print(error_msg)
         send_telegram(error_msg)
         return
 
-    # DEBUGGING OANDA CREDENTIALS (Safe version)
     print(f"DEBUG: OANDA_API_KEY loaded: {OANDA_API_KEY[:4]}...{OANDA_API_KEY[-4:] if OANDA_API_KEY else 'NONE'}")
     print(f"DEBUG: OANDA_ACCOUNT_ID loaded: {OANDA_ACCOUNT_ID}")
 
     ctx = Context(OANDA_URL, 443, token=OANDA_API_KEY)
     
-    # Notify startup ONLY ONCE per successful initialization
     send_telegram("🌙 Night Scalper Bot Live (AUD_NZD, EUR_CHF)")
     
     while True:
@@ -96,14 +111,13 @@ def run_night_scalper():
                 time.sleep(3600); continue
                 
             for symbol in PAIRS:
-                # Wrap API calls in try-except to prevent crash loops
                 try:
                     trades_resp = ctx.trade.list_open(OANDA_ACCOUNT_ID)
                     if trades_resp.status != 200:
                         print(f"API Error {trades_resp.status}: {trades_resp.body}")
                         if trades_resp.status == 403:
                             send_telegram(f"❌ 403 Forbidden: Check OANDA permissions for account {OANDA_ACCOUNT_ID}")
-                            time.sleep(3600) # Wait an hour before retrying on auth error
+                            time.sleep(3600)
                         continue
                         
                     open_trades = [t for t in trades_resp.get("trades", 200) if t.instrument == symbol]
@@ -120,26 +134,37 @@ def run_night_scalper():
                         last = df.iloc[-1]
                         
                         if last["Close"] < last["LowerBB"]:
-                            summary = ctx.account.summary(OANDA_ACCOUNT_ID).get("account", 200)
+                            summary_resp = ctx.account.summary(OANDA_ACCOUNT_ID)
+                            summary = summary_resp.get("account", 200)
                             balance = float(summary.balance)
                             sl = last["Close"] - (ATR_SL_MULT * last["ATR"])
                             tp = last["Close"] + (ATR_TP_MULT * last["ATR"])
-                            units = int((balance * RISK_PER_TRADE) / (last["Close"] - sl))
-                            place_order(ctx, symbol, units, sl, tp)
-                            send_telegram(f"🌙 Night LONG {symbol}\nPrice: {last['Close']}\nUnits: {units}")
+                            
+                            # Safety check: avoid division by zero or negative units
+                            denom = abs(last["Close"] - sl)
+                            if denom > 0:
+                                units = int((balance * RISK_PER_TRADE) / denom)
+                                if units > 0:
+                                    place_order(ctx, symbol, units, sl, tp)
+                                    send_telegram(f"🌙 Night LONG {symbol}\nPrice: {last['Close']}\nUnits: {units}")
                         
                         elif last["Close"] > last["UpperBB"]:
-                            summary = ctx.account.summary(OANDA_ACCOUNT_ID).get("account", 200)
+                            summary_resp = ctx.account.summary(OANDA_ACCOUNT_ID)
+                            summary = summary_resp.get("account", 200)
                             balance = float(summary.balance)
                             sl = last["Close"] + (ATR_SL_MULT * last["ATR"])
                             tp = last["Close"] - (ATR_TP_MULT * last["ATR"])
-                            units = int((balance * RISK_PER_TRADE) / (sl - last["Close"])) * -1
-                            place_order(ctx, symbol, units, sl, tp)
-                            send_telegram(f"🌙 Night SHORT {symbol}\nPrice: {last['Close']}\nUnits: {units}")
+                            
+                            denom = abs(sl - last["Close"])
+                            if denom > 0:
+                                units = int((balance * RISK_PER_TRADE) / denom) * -1
+                                if units < 0:
+                                    place_order(ctx, symbol, units, sl, tp)
+                                    send_telegram(f"🌙 Night SHORT {symbol}\nPrice: {last['Close']}\nUnits: {units}")
                 
                 except Exception as api_err:
                     print(f"API interaction error: {api_err}")
-                    time.sleep(60) # Short sleep on generic API error
+                    time.sleep(60)
                     
             time.sleep(300)
             
