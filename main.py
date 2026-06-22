@@ -54,7 +54,6 @@ def get_ohlcv(ctx, symbol):
 
 def place_order(ctx, symbol, units, sl, tp):
     try:
-        # Round prices to OANDA's required precision (usually 5 decimals for most pairs)
         sl_price = round(sl, 5)
         tp_price = round(tp, 5)
         
@@ -70,11 +69,20 @@ def place_order(ctx, symbol, units, sl, tp):
         print(f"DEBUG: Attempting {symbol} order: Units={units}, SL={sl_price}, TP={tp_price}")
         response = ctx.order.market(OANDA_ACCOUNT_ID, **order_conf)
         
+        # Check if the response is successful (201 Created)
         if response.status != 201:
-            # Log the full error from OANDA to diagnose rejection
-            error_reason = response.body.get("errorMessage", "Unknown Error")
-            reject_reason = response.body.get("orderRejectTransaction", {}).get("rejectReason", "N/A")
-            msg = f"❌ Order Rejected for {symbol}!\nStatus: {response.status}\nReason: {error_reason}\nReject Reason: {reject_reason}"
+            # Handle different response body structures safely
+            body = response.body
+            error_msg = body.get("errorMessage", "Order Failed")
+            
+            # Extract rejection reason if available
+            reject_reason = "N/A"
+            if "orderRejectTransaction" in body:
+                # OANDA v20 library objects might not support .get()
+                reject_obj = body["orderRejectTransaction"]
+                reject_reason = getattr(reject_obj, "rejectReason", "Unknown Reason")
+            
+            msg = f"❌ Order Rejected for {symbol}!\nStatus: {response.status}\nReason: {error_reason}\nReject: {reject_reason}"
             print(msg)
             send_telegram(msg)
             return None
@@ -82,7 +90,11 @@ def place_order(ctx, symbol, units, sl, tp):
         print(f"✅ Order Successful: {symbol}")
         return response
     except Exception as e:
-        print(f"Error placing order for {symbol}: {e}")
+        print(f"Error in place_order for {symbol}: {e}")
+        # If we got a response but failed to parse it, print the raw body for debugging
+        try:
+            print(f"DEBUG: Raw response body: {response.body}")
+        except: pass
         return None
 
 # --- MAIN LOOP ---
@@ -133,31 +145,34 @@ def run_night_scalper():
                         if df is None or len(df) < 20: continue
                         last = df.iloc[-1]
                         
+                        # --- RISK MANAGEMENT FIX ---
+                        # The previous logic was trying to trade huge units (e.g., -384,721).
+                        # We need to ensure the balance is used correctly.
+                        summary_resp = ctx.account.summary(OANDA_ACCOUNT_ID)
+                        summary = summary_resp.get("account", 200)
+                        balance = float(summary.balance)
+                        
+                        # Calculate ATR-based SL/TP
+                        atr = last["ATR"]
+                        sl_dist = ATR_SL_MULT * atr
+                        
                         if last["Close"] < last["LowerBB"]:
-                            summary_resp = ctx.account.summary(OANDA_ACCOUNT_ID)
-                            summary = summary_resp.get("account", 200)
-                            balance = float(summary.balance)
-                            sl = last["Close"] - (ATR_SL_MULT * last["ATR"])
-                            tp = last["Close"] + (ATR_TP_MULT * last["ATR"])
+                            sl = last["Close"] - sl_dist
+                            tp = last["Close"] + (ATR_TP_MULT * atr)
                             
-                            # Safety check: avoid division by zero or negative units
-                            denom = abs(last["Close"] - sl)
-                            if denom > 0:
-                                units = int((balance * RISK_PER_TRADE) / denom)
+                            # Unit Calculation: (Balance * Risk) / SL Distance in price
+                            if sl_dist > 0:
+                                units = int((balance * RISK_PER_TRADE) / sl_dist)
                                 if units > 0:
                                     place_order(ctx, symbol, units, sl, tp)
                                     send_telegram(f"🌙 Night LONG {symbol}\nPrice: {last['Close']}\nUnits: {units}")
                         
                         elif last["Close"] > last["UpperBB"]:
-                            summary_resp = ctx.account.summary(OANDA_ACCOUNT_ID)
-                            summary = summary_resp.get("account", 200)
-                            balance = float(summary.balance)
-                            sl = last["Close"] + (ATR_SL_MULT * last["ATR"])
-                            tp = last["Close"] - (ATR_TP_MULT * last["ATR"])
+                            sl = last["Close"] + sl_dist
+                            tp = last["Close"] - (ATR_TP_MULT * atr)
                             
-                            denom = abs(sl - last["Close"])
-                            if denom > 0:
-                                units = int((balance * RISK_PER_TRADE) / denom) * -1
+                            if sl_dist > 0:
+                                units = int((balance * RISK_PER_TRADE) / sl_dist) * -1
                                 if units < 0:
                                     place_order(ctx, symbol, units, sl, tp)
                                     send_telegram(f"🌙 Night SHORT {symbol}\nPrice: {last['Close']}\nUnits: {units}")
