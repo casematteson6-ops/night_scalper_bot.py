@@ -29,7 +29,7 @@ def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=10)
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=10 )
     except Exception as e:
         print(f"Failed to send Telegram: {e}")
 
@@ -57,8 +57,6 @@ def place_order(ctx, symbol, units, sl, tp):
         sl_price = round(sl, 5)
         tp_price = round(tp, 5)
         
-        # OANDA v20 library requires the instrument to be a separate argument in .market()
-        # and NOT inside the 'order' dictionary for some versions.
         order_conf = {
             "type": "MARKET", 
             "instrument": symbol, 
@@ -69,7 +67,6 @@ def place_order(ctx, symbol, units, sl, tp):
         }
         
         print(f"DEBUG: Attempting {symbol} order: Units={units}, SL={sl_price}, TP={tp_price}")
-        # Passing order_conf as keyword arguments
         response = ctx.order.market(OANDA_ACCOUNT_ID, **order_conf)
         
         if response.status != 201:
@@ -147,9 +144,6 @@ def run_night_scalper():
                         atr = last["ATR"]
                         sl_dist = ATR_SL_MULT * atr
                         
-                        # --- LEVERAGE CAP ---
-                        # To prevent "Insufficient Margin", we limit the max trade size.
-                        # Max units = Balance * Max Leverage (e.g., 20)
                         MAX_LEVERAGE = 20
                         max_units_cap = int(balance * MAX_LEVERAGE)
                         
@@ -159,7 +153,6 @@ def run_night_scalper():
                             
                             if sl_dist > 0:
                                 units = int((balance * RISK_PER_TRADE) / sl_dist)
-                                # Apply Leverage Cap
                                 units = min(units, max_units_cap)
                                 if units > 0:
                                     place_order(ctx, symbol, units, sl, tp)
@@ -171,10 +164,8 @@ def run_night_scalper():
                             
                             if sl_dist > 0:
                                 units = int((balance * RISK_PER_TRADE) / sl_dist) * -1
-                                # Apply Leverage Cap (using abs for negative units)
                                 if abs(units) > max_units_cap:
                                     units = -max_units_cap
-                                    
                                 if units < 0:
                                     place_order(ctx, symbol, units, sl, tp)
                                     send_telegram(f"🌙 Night SHORT {symbol}\nPrice: {last['Close']}\nUnits: {units}")
