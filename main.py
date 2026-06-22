@@ -36,14 +36,14 @@ def get_ohlcv(ctx, symbol):
         candles = response.get("candles", 200)
         data = [{"High": float(c.mid.h), "Low": float(c.mid.l), "Close": float(c.mid.c)} for c in candles if c.complete]
         df = pd.DataFrame(data)
-        df['MA20'] = df['Close'].rolling(window=BB_PERIOD).mean()
-        df['STD20'] = df['Close'].rolling(window=BB_PERIOD).std()
-        df['UpperBB'] = df['MA20'] + (df['STD20'] * BB_STD)
-        df['LowerBB'] = df['MA20'] - (df['STD20'] * BB_STD)
-        high_low = df['High'] - df['Low']
-        high_close = np.abs(df['High'] - df['Close'].shift(1))
-        low_close = np.abs(df['Low'] - df['Close'].shift(1))
-        df['ATR'] = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(window=ATR_PERIOD).mean()
+        df["MA20"] = df["Close"].rolling(window=BB_PERIOD).mean()
+        df["STD20"] = df["Close"].rolling(window=BB_PERIOD).std()
+        df["UpperBB"] = df["MA20"] + (df["STD20"] * BB_STD)
+        df["LowerBB"] = df["MA20"] - (df["STD20"] * BB_STD)
+        high_low = df["High"] - df["Low"]
+        high_close = np.abs(df["High"] - df["Close"].shift(1))
+        low_close = np.abs(df["Low"] - df["Close"].shift(1))
+        df["ATR"] = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(window=ATR_PERIOD).mean()
         return df
     except: return None
 
@@ -62,6 +62,17 @@ def place_order(ctx, symbol, units, sl, tp):
 def run_night_scalper():
     print("🌙 Night Scalper Bot Started...")
     send_telegram("🌙 Night Scalper Bot Live (AUD_NZD, EUR_CHF)")
+    
+    # --- DEBUGGING OANDA CREDENTIALS ---
+    # The 403 Forbidden error indicates an issue with OANDA API key or account ID permissions.
+    # Please ensure the OANDA_API_KEY and OANDA_ACCOUNT_ID environment variables are correctly set
+    # in your Railway deployment and that the API key has the necessary permissions for the account.
+    # You can temporarily uncomment the following lines to see what values are being loaded.
+    # Be careful not to expose your full API key in logs in a production environment.
+    print(f"DEBUG: OANDA_API_KEY loaded: {OANDA_API_KEY[:4]}...{OANDA_API_KEY[-4:] if OANDA_API_KEY else None}")
+    print(f"DEBUG: OANDA_ACCOUNT_ID loaded: {OANDA_ACCOUNT_ID}")
+    # --- END DEBUGGING ---
+
     ctx = Context(OANDA_URL, 443, token=OANDA_API_KEY)
     
     while True:
@@ -73,6 +84,9 @@ def run_night_scalper():
             time.sleep(3600); continue
             
         for symbol in PAIRS:
+            # The crash occurs here due to a 403 Forbidden error.
+            # This means the OANDA_API_KEY does not have permission to access OANDA_ACCOUNT_ID
+            # or the OANDA_ACCOUNT_ID is incorrect/invalid for the provided API key.
             trades_resp = ctx.trade.list_open(OANDA_ACCOUNT_ID)
             open_trades = [t for t in trades_resp.get("trades", 200) if t.instrument == symbol]
             
@@ -87,21 +101,21 @@ def run_night_scalper():
                 if df is None or len(df) < 20: continue
                 last = df.iloc[-1]
                 
-                if last['Close'] < last['LowerBB']:
+                if last["Close"] < last["LowerBB"]:
                     balance = float(ctx.account.summary(OANDA_ACCOUNT_ID).get("account", 200).balance)
-                    sl = last['Close'] - (ATR_SL_MULT * last['ATR'])
-                    tp = last['Close'] + (ATR_TP_MULT * last['ATR'])
-                    units = int((balance * RISK_PER_TRADE) / (last['Close'] - sl))
+                    sl = last["Close"] - (ATR_SL_MULT * last["ATR"])
+                    tp = last["Close"] + (ATR_TP_MULT * last["ATR"])
+                    units = int((balance * RISK_PER_TRADE) / (last["Close"] - sl))
                     place_order(ctx, symbol, units, sl, tp)
-                    send_telegram(f"🌙 Night LONG {symbol}\nPrice: {last['Close']}\nUnits: {units}")
+                    send_telegram(f"🌙 Night LONG {symbol}\nPrice: {last["Close"]}\nUnits: {units}")
                 
-                elif last['Close'] > last['UpperBB']:
+                elif last["Close"] > last["UpperBB"]:
                     balance = float(ctx.account.summary(OANDA_ACCOUNT_ID).get("account", 200).balance)
-                    sl = last['Close'] + (ATR_SL_MULT * last['ATR'])
-                    tp = last['Close'] - (ATR_TP_MULT * last['ATR'])
-                    units = int((balance * RISK_PER_TRADE) / (sl - last['Close'])) * -1
+                    sl = last["Close"] + (ATR_SL_MULT * last["ATR"])
+                    tp = last["Close"] - (ATR_TP_MULT * last["ATR"])
+                    units = int((balance * RISK_PER_TRADE) / (sl - last["Close"])) * -1
                     place_order(ctx, symbol, units, sl, tp)
-                    send_telegram(f"🌙 Night SHORT {symbol}\nPrice: {last['Close']}\nUnits: {units}")
+                    send_telegram(f"🌙 Night SHORT {symbol}\nPrice: {last["Close"]}\nUnits: {units}")
                     
         time.sleep(300)
 
