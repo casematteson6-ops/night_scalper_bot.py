@@ -257,14 +257,16 @@ class MatchTraderClient:
         """
         mt_sym  = symbol.replace("_", "").upper()
         payload = {
-            "instrument": mt_sym,
-            "orderSide":  side.upper(),
-            "volume":     round(lots, 2),
-            "slPrice":    round(sl_price, 5) if sl_price else 0,
-            "tpPrice":    round(tp_price, 5) if tp_price else 0,
-            "isMobile":   False,
+            "instrument":      mt_sym,
+            "orderSide":       side.upper(),
+            "volume":          round(lots, 2),
+            "slPrice":         round(sl_price, 5) if sl_price else 0,
+            "tpPrice":         round(tp_price, 5) if tp_price else 0,
+            "isMobile":        False,
+            "source":          "Quick trade",
+            "trailingDistance": 0,
         }
-        data = self.request("POST", f"/mtr-api/{self.system_uuid}/open-position", json=payload)
+        data = self.request("POST", f"/mtr-api/{self.system_uuid}/position/open", json=payload)
         if data is None:
             return None, "API call failed after retries"
 
@@ -279,28 +281,20 @@ class MatchTraderClient:
             return None, reason
 
     def close_position(self, position_id, symbol, open_side, volume):
-        """Closes a specific position by ID."""
-        mt_sym     = symbol.replace("_", "").upper()
-        close_side = "SELL" if open_side.upper() == "BUY" else "BUY"
-        payload    = {
-            "positionId": str(position_id),
-            "instrument": mt_sym,
-            "orderSide":  close_side,
-            "volume":     str(round(volume, 2)),
-        }
+        """Closes a specific position by ID using DELETE /position/{id}."""
         data = self.request(
-            "POST", f"/mtr-api/{self.system_uuid}/close-positions", json=payload
+            "DELETE", f"/mtr-api/{self.system_uuid}/position/{position_id}"
         )
         if data is None:
             return False, "API call failed after retries"
 
-        status = data.get("status", "")
-        error  = data.get("errorMessage", "")
+        status = data.get("status", "") if isinstance(data, dict) else ""
+        error  = data.get("errorMessage", "") if isinstance(data, dict) else ""
 
-        if status == "OK":
+        if status == "OK" or data == {}:
             return True, None
         else:
-            reason = error or data.get("nativeCode", str(data))
+            reason = error or str(data)
             return False, reason
 
     def get_candles(self, symbol, count, granularity="H1"):
