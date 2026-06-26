@@ -86,7 +86,7 @@ class MatchTraderClient:
             resp = self.session.post(url, json=payload, headers=headers, timeout=30)
             resp.raise_for_status()
             data = resp.json()
-            logger.info(f"🔍 LOGIN RESPONSE: {data}")
+            
 
             # 1. Extract main auth token
             self.auth_token = (
