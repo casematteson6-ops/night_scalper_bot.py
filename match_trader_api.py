@@ -5,7 +5,7 @@ Endpoints confirmed by live browser network inspection on 2026-06-25.
 
 Authentication flow:
 1. POST /mtr-core-edge/v2/login
-   Body: {"login": "2009271", "password": "2866def46a", "partnerId": 1}
+   Body: {"email": "...", "password": "...", "partnerId": 1}
    → Returns auth token in response + sets session cookies
 
 2. All trading endpoints use: /mtr-api/{systemUUID}/...
@@ -24,11 +24,13 @@ from datetime import datetime, timedelta
 logger = logging.getLogger(__name__)
 
 # ── Environment Variables ──────────────────────────────────────────────────────
-MT_PLATFORM_URL = os.getenv("MT_PLATFORM_URL", "https://mtr-platform.fundingpips.com").rstrip("/")
-MT_EMAIL        = os.getenv("MT_EMAIL", "")
-MT_PASSWORD     = os.getenv("MT_PASSWORD", "")
-MT_BROKER_ID    = os.getenv("MT_BROKER_ID", "FundingPips")
-MT_ACCOUNT_ID   = os.getenv("MT_ACCOUNT_ID", "2009271")
+RAW_URL = os.getenv("MT_PLATFORM_URL", "https://mtr-platform.fundingpips.com")
+MT_PLATFORM_URL = RAW_URL.split("/app/")[0].rstrip("/")
+
+MT_EMAIL      = os.getenv("MT_EMAIL", "casematteson6@gmail.com")
+MT_PASSWORD   = os.getenv("MT_PASSWORD", "")
+MT_BROKER_ID  = os.getenv("MT_BROKER_ID", "FundingPips")
+MT_ACCOUNT_ID = os.getenv("MT_ACCOUNT_ID", "2009271")
 
 # System UUID discovered from live browser session — fixed for this account
 SYSTEM_UUID = "beedbea9-c757-46ad-b93b-a52ba2c3d648"
@@ -49,18 +51,27 @@ class MatchTraderClient:
 
         self.session       = requests.Session()
         self.auth_token    = None
+        self.trading_token = None
         self.token_expiry  = datetime.min
 
     # ── Authentication ─────────────────────────────────────────────────────────
 
     def login(self):
         """
-        Login using account number + password (not email).
+        Login using email + password.
         Confirmed endpoint: POST /mtr-core-edge/v2/login
+
+        FIX: Reset the session on every login so stale cookies from a previous
+        session don't interfere with the new auth token.
         """
+        # ✅ FIX 1: Always create a fresh session so old cookies are wiped.
+        self.session = requests.Session()
+        self.auth_token    = None
+        self.trading_token = None
+
         url = f"{self.platform_url}/mtr-core-edge/v2/login"
         payload = {
-            "login":     self.account_id,   # Account number e.g. "2009271"
+            "email":     self.email,
             "password":  self.password,
             "partnerId": 1
         }
@@ -75,27 +86,42 @@ class MatchTraderClient:
             resp = self.session.post(url, json=payload, headers=headers, timeout=30)
             resp.raise_for_status()
             data = resp.json()
+            logger.info(f"🔍 LOGIN RESPONSE: {data}")
 
-            # Extract auth token from response
+            # 1. Extract main auth token
             self.auth_token = (
                 data.get("token") or
                 data.get("authToken") or
                 data.get("accessToken") or
-                data.get("tradingApiToken") or
                 ""
             )
 
-            # Also check for system UUID in response (in case it changes)
+            # 2. Extract specific trading account token (required for /mtr-api/ endpoints)
             accounts = data.get("tradingAccounts", [])
             for acct in accounts:
                 if str(acct.get("tradingAccountId", "")) == str(self.account_id):
-                    offer = acct.get("offer") or {}
-                    system = offer.get("system") or {}
-                    uuid = system.get("uuid", "")
+                    self.trading_token = acct.get("tradingApiToken")
+
+                    system = acct.get("system") or {}
+                    uuid   = system.get("uuid", "")
                     if uuid:
                         self.system_uuid = uuid
-                        logger.info(f"System UUID updated: {uuid}")
                     break
+
+            # Fallback: check top-level
+            if not self.trading_token:
+                self.trading_token = data.get("tradingApiToken")
+
+            # ✅ FIX 2: Log whether we actually got a trading token so failures
+            #           are visible immediately rather than silently 401-ing.
+            if not self.trading_token:
+                logger.error(
+                    "❌ Login succeeded but NO trading token found for account "
+                    f"{self.account_id}. Available accounts in response: "
+                    f"{[str(a.get('tradingAccountId')) for a in accounts]}"
+                )
+                logger.debug(f"Full login response: {data}")
+                return False
 
             self.token_expiry = datetime.now() + timedelta(minutes=12)
             logger.info(f"✅ Login OK | Account: {self.account_id} | UUID: {self.system_uuid}")
@@ -109,37 +135,73 @@ class MatchTraderClient:
             return False
 
     def ensure_auth(self):
-        if self.auth_token is None or datetime.now() >= self.token_expiry:
+        if (
+            self.auth_token is None
+            or self.trading_token is None
+            or datetime.now() >= self.token_expiry
+        ):
             return self.login()
         return True
 
-    def _headers(self):
+    def _headers(self, is_trading=True):
         h = {
-            "Content-Type": "application/json",
-            "Accept":       "application/json",
-            "Origin":       self.platform_url,
-            "Referer":      f"{self.platform_url}/app/trade",
-            "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Accept":                    "application/json, text/plain, */*",
+            "Content-Type":              "application/json",
+            "Origin":                    self.platform_url,
+            "Referer":                   f"{self.platform_url}/app/trade",
+            "User-Agent":                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+            "browser-request-send-time": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.") + f"{datetime.utcnow().microsecond // 1000:03d}Z",
+            "cache-policy-expiration":   "skip-initial",
+            "user-system-protection-type": "5",
         }
-        if self.auth_token:
-            h["Authorization"]     = f"Bearer {self.auth_token}"
-            h["Auth-trading-api"]  = self.auth_token
+        # ✅ Only send auth-trading-api — no Authorization: Bearer (browser doesn't send it)
+        token = self.trading_token if is_trading else self.auth_token
+        if token:
+            h["auth-trading-api"] = token
         return h
 
     # ── Core Request ───────────────────────────────────────────────────────────
 
     def request(self, method, path, retries=5, delay=15, **kwargs):
-        for attempt in range(1, retries + 1):
-            try:
-                self.ensure_auth()
-                url  = f"{self.platform_url}{path}"
-                resp = self.session.request(method, url, headers=self._headers(),
-                                            timeout=30, **kwargs)
+        """
+        FIX: On a 401/403, wipe tokens AND rebuild headers after re-login
+        before the next attempt. The old code called login() but then the
+        `continue` jumped back to a stale ensure_auth() that saw fresh-looking
+        tokens and skipped re-logging, so headers were never rebuilt with the
+        new token.
+        """
+        is_trading = "/mtr-api/" in path or "/market-data-api/" in path
 
-                if resp.status_code == 401:
-                    logger.warning(f"401 on attempt {attempt} — re-logging in...")
-                    self.auth_token = None
-                    self.login()
+        for attempt in range(1, retries + 1):
+            # ✅ FIX 3: ensure_auth() is called once here; after a 401 we call
+            #           login() explicitly below and then build fresh headers
+            #           on the very next line — no stale token risk.
+            if not self.ensure_auth():
+                logger.error("❌ Cannot authenticate. Aborting request.")
+                return None
+
+            url  = f"{self.platform_url}{path}"
+            # ✅ FIX 4: Build headers AFTER ensure_auth so they always reflect
+            #           the current token, including after a re-login.
+            headers = self._headers(is_trading)
+
+            try:
+                resp = self.session.request(
+                    method, url, headers=headers, timeout=30, **kwargs
+                )
+
+                if resp.status_code in (401, 403):
+                    logger.warning(
+                        f"{resp.status_code} on attempt {attempt}/{retries} "
+                        f"for {path} — re-logging in..."
+                    )
+                    # ✅ FIX 5: Force a full re-login (which also resets the
+                    #           session) so the next loop iteration starts clean.
+                    self.auth_token    = None
+                    self.trading_token = None
+                    self.token_expiry  = datetime.min
+                    if attempt < retries:
+                        time.sleep(2)  # brief pause before re-login
                     continue
 
                 resp.raise_for_status()
@@ -148,7 +210,10 @@ class MatchTraderClient:
             except requests.exceptions.Timeout:
                 logger.warning(f"⚠️ Timeout attempt {attempt}/{retries}. Retry in {delay}s...")
             except requests.exceptions.HTTPError as e:
-                logger.warning(f"⚠️ HTTP {e.response.status_code} attempt {attempt}/{retries}: {e.response.text[:200]}")
+                logger.warning(
+                    f"⚠️ HTTP {e.response.status_code} attempt {attempt}/{retries}: "
+                    f"{e.response.text[:200]}"
+                )
             except Exception as e:
                 logger.warning(f"⚠️ Error attempt {attempt}/{retries}: {e}")
 
@@ -181,7 +246,7 @@ class MatchTraderClient:
             return None
         positions = data.get("positions", []) if isinstance(data, dict) else data
         if symbol:
-            mt_sym = symbol.replace("_", "").upper()
+            mt_sym    = symbol.replace("_", "").upper()
             positions = [p for p in positions if p.get("symbol", "").upper() == mt_sym]
         return positions
 
@@ -190,7 +255,7 @@ class MatchTraderClient:
         Opens a market position.
         Returns (order_id, error_message)
         """
-        mt_sym = symbol.replace("_", "").upper()
+        mt_sym  = symbol.replace("_", "").upper()
         payload = {
             "instrument": mt_sym,
             "orderSide":  side.upper(),
@@ -217,13 +282,15 @@ class MatchTraderClient:
         """Closes a specific position by ID."""
         mt_sym     = symbol.replace("_", "").upper()
         close_side = "SELL" if open_side.upper() == "BUY" else "BUY"
-        payload = {
+        payload    = {
             "positionId": str(position_id),
             "instrument": mt_sym,
             "orderSide":  close_side,
             "volume":     str(round(volume, 2)),
         }
-        data = self.request("POST", f"/mtr-api/{self.system_uuid}/close-positions", json=payload)
+        data = self.request(
+            "POST", f"/mtr-api/{self.system_uuid}/close-positions", json=payload
+        )
         if data is None:
             return False, "API call failed after retries"
 
@@ -242,10 +309,11 @@ class MatchTraderClient:
         Uses confirmed endpoint: /market-data-api/{uuid}/candles
         granularity: 'M1','M5','M15','M30','H1','H4','D1'
         """
-        mt_sym  = symbol.replace("_", "").upper()
-        # Confirmed interval format from browser: H1, M1, M5, M15, M30, H4, D1
-        path = (f"/market-data-api/{self.system_uuid}/candles"
-                f"?symbol={mt_sym}&interval={granularity}&candleSide=BID&amount={count}")
+        mt_sym = symbol.replace("_", "").upper()
+        path   = (
+            f"/market-data-api/{self.system_uuid}/candles"
+            f"?symbol={mt_sym}&interval={granularity}&candleSide=BID&amount={count}"
+        )
         data = self.request("GET", path)
 
         if data is None:
@@ -290,6 +358,6 @@ class MatchTraderClient:
         if sl_distance_price <= 0:
             return 0.01
         risk_amount = balance * risk_pct
-        lots = risk_amount / (sl_distance_price * 100000)
-        lots = max(0.01, round(lots, 2))
+        lots        = risk_amount / (sl_distance_price * 100000)
+        lots        = max(0.01, round(lots, 2))
         return lots
