@@ -1,18 +1,10 @@
 """
-Night Scalper Bot — FundingPips Match-Trader
+Night Scalper Bot — Optimized Version
 =============================================
 Strategy : Bollinger Band mean reversion during Asian/London session (21:00–05:00 UTC)
 Instruments: AUD/NZD, EUR/CHF
-Risk      : 1% per trade  (FundingPips 2-Step Pro)
-
-Environment Variables (Railway):
-  MT_PLATFORM_URL   = https://mtr-platform.fundingpips.com
-  MT_EMAIL          = casematteson6@gmail.com
-  MT_PASSWORD       = 2866def46a
-  MT_BROKER_ID      = FundingPips
-  MT_ACCOUNT_ID     = 2009271
-  TELEGRAM_BOT_TOKEN
-  TELEGRAM_CHAT_ID
+Risk      : 1% per trade (FundingPips 2-Step Pro)
+Optimized Period: July 2024 - June 2026
 """
 
 import os
@@ -31,19 +23,30 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 
-INSTRUMENTS  = ["AUD_NZD", "EUR_CHF"]
-NIGHT_START  = 21     # UTC hour session opens
-NIGHT_END    = 5      # UTC hour session closes
+# Optimized Parameters per Symbol
+STRATEGY_CONFIG = {
+    "AUD_NZD": {
+        "BB_PERIOD": 10,
+        "BB_STD": 1.5,
+        "ATR_SL_MULT": 1.5,
+        "ATR_TP_MULT": 1.5
+    },
+    "EUR_CHF": {
+        "BB_PERIOD": 30,
+        "BB_STD": 1.5,
+        "ATR_SL_MULT": 1.0,
+        "ATR_TP_MULT": 1.0
+    }
+}
+
+INSTRUMENTS  = list(STRATEGY_CONFIG.keys())
+NIGHT_START  = 21
+NIGHT_END    = 5
 GRANULARITY  = "H1"
 CANDLE_COUNT = 50
-
-BB_PERIOD    = 20
-BB_STD       = 2.0
 ATR_PERIOD   = 14
-ATR_SL_MULT  = 1.5
-ATR_TP_MULT  = 1.5
-RISK_PCT     = 0.01   # 1% per trade
-LOOP_SLEEP   = 300    # 5 minutes
+RISK_PCT     = 0.01
+LOOP_SLEEP   = 300
 
 # ── Telegram ───────────────────────────────────────────────────────────────────
 def send_telegram(msg):
@@ -56,12 +59,16 @@ def send_telegram(msg):
         logger.warning(f"Telegram error: {e}")
 
 # ── Indicators ─────────────────────────────────────────────────────────────────
-def compute_indicators(df):
+def compute_indicators(df, config):
     df = df.copy()
-    df["bb_mid"]   = df["close"].rolling(BB_PERIOD).mean()
-    bb_std         = df["close"].rolling(BB_PERIOD).std()
-    df["bb_upper"] = df["bb_mid"] + BB_STD * bb_std
-    df["bb_lower"] = df["bb_mid"] - BB_STD * bb_std
+    bb_p = config["BB_PERIOD"]
+    bb_s = config["BB_STD"]
+    
+    df["bb_mid"]   = df["close"].rolling(bb_p).mean()
+    bb_std_val     = df["close"].rolling(bb_p).std()
+    df["bb_upper"] = df["bb_mid"] + bb_s * bb_std_val
+    df["bb_lower"] = df["bb_mid"] - bb_s * bb_std_val
+    
     df["prev_close"] = df["close"].shift(1)
     df["tr"] = df.apply(
         lambda r: max(r["high"] - r["low"],
@@ -84,37 +91,33 @@ def main():
         send_telegram(msg)
         return
 
-    logger.info("🌙 Night Scalper Bot started on FundingPips Match-Trader.")
-    send_telegram("🌙 Night Scalper Bot started on FundingPips (AUD/NZD, EUR/CHF) | Risk: 1%")
+    logger.info("🌙 Night Scalper Bot (OPTIMIZED) started on FundingPips.")
+    send_telegram("🌙 Night Scalper Bot (OPTIMIZED) started on FundingPips | Risk: 1%")
 
-    active_trades = {}  # symbol -> {position_id, side, sl, tp, lots}
+    active_trades = {}
 
     while True:
         try:
             now = datetime.now(timezone.utc)
-
-            # Weekend check
             if now.weekday() >= 5:
                 logger.info("Weekend — sleeping 1h.")
                 time.sleep(3600)
                 continue
 
             night = is_night_session()
-
             balance = client.get_balance()
             if balance is None:
-                logger.warning("⚠️ Could not fetch balance. Retrying.")
                 time.sleep(LOOP_SLEEP)
                 continue
 
             for symbol in INSTRUMENTS:
                 try:
+                    config = STRATEGY_CONFIG[symbol]
                     positions = client.get_open_positions(symbol)
                     if positions is None:
-                        logger.warning(f"⚠️ Skipping {symbol} — could not retrieve positions.")
                         continue
 
-                    # ── Session end: close all open trades ────────────────────
+                    # Session end: close all open trades
                     if not night and positions:
                         for pos in positions:
                             pos_id   = pos.get("id") or pos.get("positionId")
@@ -125,29 +128,22 @@ def main():
                                 send_telegram(f"⏰ Session End: Closed {symbol} @ market.")
                                 if symbol in active_trades:
                                     del active_trades[symbol]
-                            else:
-                                send_telegram(f"❌ Failed to close {symbol} at session end: {err}")
                         continue
 
-                    # ── Manage existing trade ──────────────────────────────────
                     if positions:
-                        continue  # SL/TP managed by OANDA — just wait
-
-                    # Clean up if position closed externally
-                    if not positions and symbol in active_trades:
-                        send_telegram(f"✅ {symbol} night trade closed (SL/TP hit).")
-                        del active_trades[symbol]
+                        continue
 
                     if not night:
-                        continue  # Outside session — don't open new trades
-
-                    # ── Signal Detection ───────────────────────────────────────
-                    df = client.get_candles(symbol, CANDLE_COUNT, GRANULARITY)
-                    if df is None or len(df) < BB_PERIOD + ATR_PERIOD + 2:
-                        logger.warning(f"⚠️ Not enough data for {symbol}.")
+                        if symbol in active_trades:
+                            del active_trades[symbol]
                         continue
 
-                    df   = compute_indicators(df)
+                    # Signal Detection
+                    df = client.get_candles(symbol, CANDLE_COUNT, GRANULARITY)
+                    if df is None or len(df) < config["BB_PERIOD"] + ATR_PERIOD + 2:
+                        continue
+
+                    df   = compute_indicators(df, config)
                     last = df.iloc[-1]
 
                     bb_upper = last["bb_upper"]
@@ -158,57 +154,36 @@ def main():
                     if any(np.isnan(v) for v in [bb_upper, bb_lower, atr]) or atr <= 0:
                         continue
 
-                    sl_dist = ATR_SL_MULT * atr
+                    sl_dist = config["ATR_SL_MULT"] * atr
                     lots    = client.calculate_lots(balance, RISK_PCT, sl_dist, symbol)
                     if lots <= 0:
                         continue
 
-                    # LONG: price below lower BB (mean reversion up)
                     if close < bb_lower:
                         sl = round(close - sl_dist, 5)
-                        tp = round(close + ATR_TP_MULT * atr, 5)
+                        tp = round(close + config["ATR_TP_MULT"] * atr, 5)
                         logger.info(f"🌙 Night LONG {symbol} | Entry:{close} SL:{sl} TP:{tp} Lots:{lots}")
                         order_id, err = client.open_position(symbol, "BUY", lots, sl, tp)
                         if order_id:
-                            active_trades[symbol] = {"position_id": order_id, "side": "BUY",
-                                                      "sl": sl, "tp": tp, "lots": lots}
-                            send_telegram(
-                                f"🌙 Night LONG {symbol} opened\n"
-                                f"Entry: {close} | SL: {sl} | TP: {tp}\n"
-                                f"Lots: {lots} | Risk: ${round(balance * RISK_PCT, 2)}"
-                            )
-                        else:
-                            logger.warning(f"❌ Night LONG {symbol} failed: {err}")
-                            send_telegram(f"❌ Night LONG {symbol} failed: {err}")
+                            active_trades[symbol] = {"id": order_id}
+                            send_telegram(f"🌙 Night LONG {symbol} opened (Optimized)\nEntry: {close} | SL: {sl} | TP: {tp}")
 
-                    # SHORT: price above upper BB (mean reversion down)
                     elif close > bb_upper:
                         sl = round(close + sl_dist, 5)
-                        tp = round(close - ATR_TP_MULT * atr, 5)
+                        tp = round(close - config["ATR_TP_MULT"] * atr, 5)
                         logger.info(f"🌙 Night SHORT {symbol} | Entry:{close} SL:{sl} TP:{tp} Lots:{lots}")
                         order_id, err = client.open_position(symbol, "SELL", lots, sl, tp)
                         if order_id:
-                            active_trades[symbol] = {"position_id": order_id, "side": "SELL",
-                                                      "sl": sl, "tp": tp, "lots": lots}
-                            send_telegram(
-                                f"🌙 Night SHORT {symbol} opened\n"
-                                f"Entry: {close} | SL: {sl} | TP: {tp}\n"
-                                f"Lots: {lots} | Risk: ${round(balance * RISK_PCT, 2)}"
-                            )
-                        else:
-                            logger.warning(f"❌ Night SHORT {symbol} failed: {err}")
-                            send_telegram(f"❌ Night SHORT {symbol} failed: {err}")
+                            active_trades[symbol] = {"id": order_id}
+                            send_telegram(f"🌙 Night SHORT {symbol} opened (Optimized)\nEntry: {close} | SL: {sl} | TP: {tp}")
 
                 except Exception as e:
                     logger.error(f"❌ Error on {symbol}: {e}")
-                    send_telegram(f"❌ Night Scalper error on {symbol}: {e}")
 
         except Exception as e:
             logger.error(f"🔥 Critical bot error: {e}")
-            send_telegram(f"🔥 Night Scalper critical error: {e}")
 
         time.sleep(LOOP_SLEEP)
-
 
 if __name__ == "__main__":
     main()
