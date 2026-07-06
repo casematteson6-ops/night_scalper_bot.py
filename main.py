@@ -1,10 +1,8 @@
 """
-🌙 NIGHT SCALPER MAX YIELD FINAL — EUR/CHF & AUD/NZD
+🌙 NIGHT SCALPER MAX YIELD FINAL — EUR/CHF
 =====================================================
 Fully Optimized via 2-year backtest comparison:
 - EUR/CHF: +63.80% Return (BB:30, SL:1.0x, TP:1.0x)
-- AUD/NZD: +54.96% Return (BB:20, SL:1.5x, TP:2.0x)
-Combined Portfolio: ~118.76% Total Potential Return
 """
  
 import os
@@ -30,12 +28,6 @@ STRATEGY_CONFIG = {
         "BB_STD": 1.5,
         "ATR_SL_MULT": 1.0,
         "ATR_TP_MULT": 1.0
-    },
-    "AUD_NZD": {
-        "BB_PERIOD": 20, # Optimized from 10
-        "BB_STD": 1.5,
-        "ATR_SL_MULT": 1.5,
-        "ATR_TP_MULT": 2.0  # Optimized from 1.5
     }
 }
  
@@ -89,7 +81,7 @@ def main():
         return
  
     logger.info("🌙 Night Scalper MAX YIELD Final Bot Started.")
-    send_telegram("🌙 Night Scalper MAX YIELD Final Started | EUR/CHF & AUD/NZD | Risk: 0.5%")
+    send_telegram("🌙 Night Scalper MAX YIELD Final Started | EUR/CHF | Risk: 0.5%")
  
     while True:
         try:
