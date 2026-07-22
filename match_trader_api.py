@@ -86,7 +86,6 @@ class MatchTraderClient:
             resp = self.session.post(url, json=payload, headers=headers, timeout=30)
             resp.raise_for_status()
             data = resp.json()
-            
 
             # 1. Extract main auth token
             self.auth_token = (
@@ -344,14 +343,36 @@ class MatchTraderClient:
     def calculate_lots(balance, risk_pct, sl_distance_price, symbol=""):
         """
         Calculate lot size for Match-Trader.
+
         Standard FX: 1 lot = 100,000 units.
+        Gold/Silver (XAU/XAG): 1 lot = 100 oz.
+        Crypto (BTC/ETH): 1 lot = 1 coin.
+        Using the forex contract size for Gold or crypto makes
+        every trade round down to the 0.01 minimum lot floor
+        regardless of intended risk, since the correct lot size is
+        orders of magnitude smaller in notional terms. This was
+        silently happening before this fix: every non-forex trade
+        was landing on the 0.01 floor instead of a real risk-based
+        size, decoupling actual risk taken from both account
+        balance and the intended risk_pct.
+
         risk_pct: e.g. 0.01 for 1%
         sl_distance_price: distance from entry to SL in price
         Returns lot size (float, minimum 0.01).
         """
         if sl_distance_price <= 0:
             return 0.01
+
+        normalized_symbol = symbol.replace("_", "").replace("/", "").upper()
+
+        if normalized_symbol.startswith("XAU") or normalized_symbol.startswith("XAG"):
+            contract_size = 100      # 100 oz per standard lot (Gold/Silver)
+        elif normalized_symbol.startswith("BTC") or normalized_symbol.startswith("ETH"):
+            contract_size = 1        # 1 coin per standard lot (crypto)
+        else:
+            contract_size = 100000   # 100,000 units per standard forex lot
+
         risk_amount = balance * risk_pct
-        lots        = risk_amount / (sl_distance_price * 100000)
+        lots        = risk_amount / (sl_distance_price * contract_size)
         lots        = max(0.01, round(lots, 2))
         return lots
