@@ -50,7 +50,7 @@ ATR_PERIOD       = 26
 ATR_SL_MULT      = 2.75
 ATR_TP_MULT      = 4.5
 
-RISK_PCT     = 0.005   # 0.5% per trade -- matches what was actually tested
+RISK_PCT     = 0.0075   # 0.5% per trade -- matches what was actually tested
 LOOP_SLEEP   = 3600    # scan once per hour, matches H1 granularity
 
 # ── Telegram ───────────────────────────────────────────────────────────────────
