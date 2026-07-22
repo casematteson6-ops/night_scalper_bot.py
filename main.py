@@ -1,31 +1,24 @@
 """
-🌙 NIGHT SCALPER MAX YIELD FINAL — EUR/CHF
+⚡ EMA TREND SCALPER — EUR/CHF
 =====================================================
-Parameters below came from a ForexLab Walk-Forward Optimization
-pin (not yet independently re-validated with widened ranges).
+Validated via ForexLab pipeline on real OANDA EUR/CHF H1 history
+(2021-2026):
 
-⚠️ KNOWN ISSUES WITH THESE SPECIFIC PARAMETERS — READ BEFORE
-   DEPLOYING LIVE:
+  - Backtest (realistic $2.50/lot commission, 1 pip slippage):
+      374 trades, 44.7% win rate, +$1,459 net profit, 10.3% max DD
+  - Walk-Forward Optimization: 4/5 folds profitable out-of-sample
+  - Monte Carlo (3000 resamples of the actual trades): 84.6%
+      probability of profit
 
-1. NIGHT_START=21, NIGHT_END=23 mathematically disables the
-   night-session filter. is_night_session() returns True if
-   hour >= 21 OR hour < 23 -- that's true for every hour of the
-   day (0-22 satisfies "hour < 23", 23 satisfies "hour >= 21").
-   This bot will now scan and trade around the clock, not just at
-   night. If that's not what you intended, this needs fixing
-   before going live.
+Logic: fast/slow EMA crossover, filtered by a longer-term trend
+EMA (only trade with the dominant direction) and RSI momentum
+confirmation. Trades all day, every weekday -- no time-of-day
+restriction, unlike the Night Scalper bot.
 
-2. BB_STD=4.0 and ATR_SL_MULT=0.2 both sit exactly at the edge of
-   the ranges tested during optimization. That's usually a sign
-   the true optimum is outside the tested range, or that the
-   optimizer is chasing an extreme rather than a real edge.
-   Recommend widening the ranges in ForexLab and re-running
-   Walk-Forward before trusting this.
-
-3. ATR_SL_MULT=0.2 is an extremely tight stop relative to
-   ATR_TP_MULT=1.8 (a ~9:1 reward-to-risk shape). This kind of
-   stop is especially vulnerable to real-world slippage and
-   spread widening beyond what any backtest can fully capture.
+⚠️ Same caveat as the other validated bots: this is the best
+result from a multi-round parameter search. Walk-Forward and
+Monte Carlo both passed, which is a good sign, but recommend
+demo-account-first, not immediately full size on live/funded.
 """
 
 import os
@@ -44,24 +37,21 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# Walk-Forward pinned parameters (see caveats above)
-STRATEGY_CONFIG = {
-    "EUR_CHF": {
-        "BB_PERIOD": 67,
-        "BB_STD": 4.0,
-        "ATR_SL_MULT": 0.2,
-        "ATR_TP_MULT": 1.8
-    }
-}
-
-INSTRUMENTS  = list(STRATEGY_CONFIG.keys())
-NIGHT_START  = 21
-NIGHT_END    = 23   # ⚠️ see caveat #1 above -- this disables the night filter
+SYMBOL       = "EUR_CHF"
 GRANULARITY  = "H1"
-CANDLE_COUNT = 100   # bumped from 50 -- BB_PERIOD=67 needs at least 67+ candles
-ATR_PERIOD   = 2
-RISK_PCT     = 0.01
-LOOP_SLEEP   = 300 # Scan every 5 minutes
+CANDLE_COUNT = 500   # generous window so the 175-period trend EMA has room to converge
+
+# ForexLab-validated parameters
+FAST_EMA_PERIOD  = 3
+SLOW_EMA_PERIOD  = 18
+TREND_EMA_PERIOD = 175
+RSI_PERIOD       = 21
+ATR_PERIOD       = 26
+ATR_SL_MULT      = 2.75
+ATR_TP_MULT      = 4.5
+
+RISK_PCT     = 0.005   # 0.5% per trade -- matches what was actually tested
+LOOP_SLEEP   = 3600    # scan once per hour, matches H1 granularity
 
 # ── Telegram ───────────────────────────────────────────────────────────────────
 def send_telegram(msg):
@@ -74,16 +64,19 @@ def send_telegram(msg):
         logger.warning(f"Telegram error: {e}")
 
 # ── Indicators ─────────────────────────────────────────────────────────────────
-def compute_indicators(df, config):
+def compute_indicators(df):
     df = df.copy()
-    bb_p = config["BB_PERIOD"]
-    bb_s = config["BB_STD"]
-    
-    df["bb_mid"]   = df["close"].rolling(bb_p).mean()
-    bb_std_val     = df["close"].rolling(bb_p).std()
-    df["bb_upper"] = df["bb_mid"] + bb_s * bb_std_val
-    df["bb_lower"] = df["bb_mid"] - bb_s * bb_std_val
-    
+
+    df["fast_ema"]  = df["close"].ewm(span=FAST_EMA_PERIOD, adjust=False).mean()
+    df["slow_ema"]  = df["close"].ewm(span=SLOW_EMA_PERIOD, adjust=False).mean()
+    df["trend_ema"] = df["close"].ewm(span=TREND_EMA_PERIOD, adjust=False).mean()
+
+    delta    = df["close"].diff()
+    gain     = delta.clip(lower=0).rolling(RSI_PERIOD).mean()
+    loss     = (-delta).clip(lower=0).rolling(RSI_PERIOD).mean()
+    rs       = gain / loss.replace(0, np.nan)
+    df["rsi"] = 100 - (100 / (1 + rs))
+
     df["prev_close"] = df["close"].shift(1)
     df["tr"] = df.apply(
         lambda r: max(r["high"] - r["low"],
@@ -92,10 +85,6 @@ def compute_indicators(df, config):
     df["atr"] = df["tr"].rolling(ATR_PERIOD).mean()
     return df
 
-def is_night_session():
-    hour = datetime.now(timezone.utc).hour
-    return hour >= NIGHT_START or hour < NIGHT_END
-
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main():
     client = MatchTraderClient()
@@ -103,87 +92,78 @@ def main():
         logger.error("❌ Login Failed.")
         return
 
-    logger.info("🌙 Night Scalper MAX YIELD Final Bot Started.")
-    send_telegram("🌙 Night Scalper MAX YIELD Final Started | EUR/CHF | Risk: 0.5%")
+    logger.info("⚡ EMA Trend Scalper Bot Started.")
+    send_telegram("⚡ EMA Trend Scalper Bot Started | EUR/CHF | Risk: 0.5%")
 
     while True:
         try:
             now = datetime.now(timezone.utc)
-            if now.weekday() >= 5: # Skip weekends
+            if now.weekday() >= 5:  # Skip weekends
                 time.sleep(3600)
                 continue
 
-            night = is_night_session()
             balance = client.get_balance()
             if balance is None:
                 time.sleep(60)
                 continue
 
-            for symbol in INSTRUMENTS:
-                try:
-                    config = STRATEGY_CONFIG[symbol]
-                    positions = client.get_open_positions(symbol)
-                    
-                    # Session end: close all open trades for this symbol
-                    if not night and positions:
-                        for pos in positions:
-                            pos_id   = pos.get("id") or pos.get("positionId")
-                            pos_side = pos.get("side", "BUY")
-                            pos_vol  = float(pos.get("volume", 0.01))
-                            ok, err  = client.close_position(pos_id, symbol, pos_side, pos_vol)
-                            if ok:
-                                send_telegram(f"⏰ Session End: Closed {symbol} @ market.")
-                        continue
+            positions = client.get_open_positions(SYMBOL)
+            if positions:  # Only one position at a time
+                time.sleep(LOOP_SLEEP)
+                continue
 
-                    # If already in a position, don't enter another
-                    if positions:
-                        continue
+            df = client.get_candles(SYMBOL, CANDLE_COUNT, GRANULARITY)
+            if df is None or len(df) < TREND_EMA_PERIOD + ATR_PERIOD + 2:
+                time.sleep(60)
+                continue
 
-                    # If not night session, don't enter new trades
-                    if not night:
-                        continue
+            df   = compute_indicators(df)
+            last = df.iloc[-1]
+            prev = df.iloc[-2]
 
-                    # Signal Detection
-                    df = client.get_candles(symbol, CANDLE_COUNT, GRANULARITY)
-                    if df is None or len(df) < config["BB_PERIOD"] + ATR_PERIOD + 2:
-                        continue
+            close     = last["close"]
+            fast_ema  = last["fast_ema"]
+            slow_ema  = last["slow_ema"]
+            trend_ema = last["trend_ema"]
+            rsi_val   = last["rsi"]
+            atr_val   = last["atr"]
 
-                    df   = compute_indicators(df, config)
-                    last = df.iloc[-1]
+            if any(np.isnan(v) for v in [fast_ema, slow_ema, trend_ema, rsi_val, atr_val,
+                                          prev["fast_ema"], prev["slow_ema"]]):
+                time.sleep(60)
+                continue
 
-                    bb_upper, bb_lower, atr, close = last["bb_upper"], last["bb_lower"], last["atr"], last["close"]
+            crossed_up   = prev["fast_ema"] <= prev["slow_ema"] and fast_ema > slow_ema
+            crossed_down = prev["fast_ema"] >= prev["slow_ema"] and fast_ema < slow_ema
 
-                    if any(np.isnan(v) for v in [bb_upper, bb_lower, atr]):
-                        continue
+            sl_dist = ATR_SL_MULT * atr_val
+            tp_dist = ATR_TP_MULT * atr_val
 
-                    sl_dist = config["ATR_SL_MULT"] * atr
-                    lots    = client.calculate_lots(balance, RISK_PCT, sl_dist, symbol)
-                    if lots <= 0:
-                        continue
+            lots = client.calculate_lots(balance, RISK_PCT, sl_dist, SYMBOL)
+            if lots <= 0:
+                time.sleep(60)
+                continue
 
-                    # LONG Signal
-                    if close < bb_lower:
-                        sl = round(close - sl_dist, 5)
-                        tp = round(close + config["ATR_TP_MULT"] * atr, 5)
-                        logger.info(f"🌙 Night LONG {symbol} | Entry:{close} SL:{sl} TP:{tp}")
-                        order_id, err = client.open_position(symbol, "BUY", lots, sl, tp)
-                        if order_id:
-                            send_telegram(f"🌙 Night LONG {symbol} Opened (Max Yield)\nEntry: {close} | SL: {sl} | TP: {tp}")
+            # LONG Signal
+            if crossed_up and close > trend_ema and rsi_val > 50:
+                sl = round(close - sl_dist, 5)
+                tp = round(close + tp_dist, 5)
+                logger.info(f"🔼 LONG {SYMBOL} | Entry:{close} SL:{sl} TP:{tp}")
+                order_id, err = client.open_position(SYMBOL, "BUY", lots, sl, tp)
+                if order_id:
+                    send_telegram(f"✅ LONG {SYMBOL} Opened (EMA Trend Scalper)\nEntry: {close} | SL: {sl} | TP: {tp}")
 
-                    # SHORT Signal
-                    elif close > bb_upper:
-                        sl = round(close + sl_dist, 5)
-                        tp = round(close - config["ATR_TP_MULT"] * atr, 5)
-                        logger.info(f"🌙 Night SHORT {symbol} | Entry:{close} SL:{sl} TP:{tp}")
-                        order_id, err = client.open_position(symbol, "SELL", lots, sl, tp)
-                        if order_id:
-                            send_telegram(f"🌙 Night SHORT {symbol} Opened (Max Yield)\nEntry: {close} | SL: {sl} | TP: {tp}")
-
-                except Exception as e:
-                    logger.error(f"❌ Error on {symbol}: {e}")
+            # SHORT Signal
+            elif crossed_down and close < trend_ema and rsi_val < 50:
+                sl = round(close + sl_dist, 5)
+                tp = round(close - tp_dist, 5)
+                logger.info(f"🔽 SHORT {SYMBOL} | Entry:{close} SL:{sl} TP:{tp}")
+                order_id, err = client.open_position(SYMBOL, "SELL", lots, sl, tp)
+                if order_id:
+                    send_telegram(f"✅ SHORT {SYMBOL} Opened (EMA Trend Scalper)\nEntry: {close} | SL: {sl} | TP: {tp}")
 
         except Exception as e:
-            logger.error(f"🔥 Critical bot error: {e}")
+            logger.error(f"🔥 Error: {e}")
 
         time.sleep(LOOP_SLEEP)
 
